@@ -58,8 +58,6 @@ rule dustFavorsTheHouse(env e, uint assetsIn, address receiver, address owner)
     assert balanceAfter >= balanceBefore;
 }
 
-
-
 // ghost and hook
 ghost mathint sumOfBalances {
     init_state axiom sumOfBalances == 0;
@@ -77,8 +75,6 @@ hook Sload uint256 val balanceOf[KEY address addy] STORAGE {
 // Property: system solvency (total supply is the sum of all balances)
 invariant totalSupplyIsSumOfBalances(env e)
     totalSupply() == sumOfBalances
-
-
 
 // last revert rule
 // Property: if a deposit fails, the user's balance should not change

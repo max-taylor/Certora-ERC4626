@@ -11,8 +11,8 @@ fi
 certoraRun \
     certora/harnesses/mixins/ERC4626BalanceOfHarness.sol \
     certora/helpers/DummyERC20A.sol certora/helpers/DummyERC20B.sol \
-    --verify ERC4626BalanceOfHarness:certora/specs/example.spec \
-    --solc solc8.0 \
+    --verify ERC4626BalanceOfHarness:certora/specs/mySpec.spec \
+    --solc solc \
     --optimistic_loop \
     --loop_iter 3 \
     --send_only \
