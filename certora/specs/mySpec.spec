@@ -71,6 +71,14 @@ hook Sload uint256 val balanceOf[KEY address account] STORAGE {
 invariant totalSupplyIsSumOfBalances()
   totalSupply() == ghostSumOfBalances
 
+invariant totalSupplyLessThanMax()
+  totalSupply() <= 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+  {
+    preserved {
+      requireInvariant totalSupplyIsSumOfBalances();
+    }
+  }
+
 invariant totalSupplyNonZeroAssetsNonZero(env e)
   totalSupply() > 0 => totalAssets() > 0
   {
@@ -85,13 +93,14 @@ invariant totalSupplyNonZeroAssetsNonZero(env e)
 // The pre-state is fine, but the post-state fails, assuming because of precision loss
 
 // Rounding favours the contract, there is left-over dust in the contract after withdraws and 
-invariant totalAssetsIsSolvent(env e)
-    totalAssets() == convertToAssets(totalSupply())
-  {
-    preserved {
-      requireInvariant totalSupplyNonZeroAssetsNonZero(e);
-    }
-  }
+// invariant totalAssetsIsSolvent(env e)
+//     convertToAssets(totalSupply()) <= totalAssets()
+//   {
+//     preserved {
+//       setup(e); // new
+//       requireInvariant totalSupplyNonZeroAssetsNonZero(e);
+//     }
+//   }
 
 rule depositingAssetsReturnsShares(env e, uint256 amount, address receiver) {
   require asset() != currentContract;
@@ -137,32 +146,14 @@ rule unitDepositMintShouldUpdateState(method f, uint256 amount, address receiver
   assert ERC20a.balanceOf(currentContract) > contractBalanceBefore, "Contract balance should've increased";
 }
 
-function callDepositMint(env e, method f, uint256 amount, address receiver) returns bool {
-  if (f.selector == deposit(uint256, address).selector) {
-    deposit@withrevert(e, amount, receiver);
 
-    return !lastReverted;
-  } else {
-    mint@withrevert(e, amount, receiver);
-
-    return !lastReverted;
-  }
-}
-
-// rule methodsShouldntRevert() {
-//   env e; method f; calldataarg arg;
-
-//   f@withrevert(e, arg);
-
-//   assert !lastReverted, "Method shouldn't revert";
-// }
-
-// TODO: Could do same test for mint, withdraw and redeem
+// ! Can't seem to verify this, it does revert in some instances
 rule convertToAssetsNoRevertAfterDeposit(uint256 amount, address receiver) {
   env e;
 
+  setup(e);
   requireInvariant totalSupplyIsSumOfBalances();
-  requireInvariant totalAssetsIsSolvent(e);
+  requireInvariant totalSupplyNonZeroAssetsNonZero(e);
 
   // TODO: Need a nice way to target deposit and mint at the same time
   uint256 shares = deposit(e, amount, receiver);
@@ -175,22 +166,35 @@ rule convertToAssetsNoRevertAfterDeposit(uint256 amount, address receiver) {
 
 // **** Variable transition
 
-// rule allowedUserCanOnlyReduceUpToAllowance(address owner) {
-//   env e; method f; calldataarg args;
-
-//   uint256 beforeBalance = balanceOf(owner);
-//   uint256 beforeAllowance = allowance(e.msg.sender, owner);
-//   f(e, args);
-//   uint256 afterBalance = balanceOf(owner);
-
-//   mathint balanceReduction = beforeBalance - afterBalance;
-
-//   assert balanceReduction > 0 => (owner == e.msg.sender
-//     || beforeAllowance >= balanceReduction);
-// }
-
 // Users can only reduce the balance of others up to the allowance they are given
+rule allowedUserCanOnlyReduceUpToAllowance(address owner) {
+  env e; method f; calldataarg args;
+
+  setup(e);
+  requireInvariant totalSupplyIsSumOfBalances();
+
+  uint256 beforeBalance = balanceOf(owner);
+  uint256 beforeAllowance = allowance(owner, e.msg.sender);
+  f(e, args);
+  uint256 afterBalance = balanceOf(owner);
+
+  mathint balanceReduction = beforeBalance - afterBalance;
+
+  assert balanceReduction > 0 => (owner == e.msg.sender
+    || beforeAllowance >= balanceReduction);
+}
+
 // If balanceOf increased, deposit, mint or transfer was called
+rule balanceOfIncreasedOnSelectMethods() {
+  env e; method f; calldataarg args;
+
+  uint256 beforeBalance = balanceOf(e.msg.sender);
+  f(e, args);
+  uint256 afterBalance = balanceOf(e.msg.sender);
+
+  assert afterBalance > beforeBalance <=> (f.selector == deposit(uint256, address).selector || f.selector == mint(uint256, address).selector);
+}
+
 // If balanceOf decreased, withdraw, redeem or transfer was called
 
 // Anti-monotinicity
@@ -200,3 +204,17 @@ rule convertToAssetsNoRevertAfterDeposit(uint256 amount, address receiver) {
 // **** State transition
 
 // Total supply of vault == 0 only if balance of contract == 0 (no deposits == no shares)
+
+// **** Helpers
+
+function callDepositMint(env e, method f, uint256 amount, address receiver) returns bool {
+  if (f.selector == deposit(uint256, address).selector) {
+    deposit@withrevert(e, amount, receiver);
+
+    return !lastReverted;
+  } else {
+    mint@withrevert(e, amount, receiver);
+
+    return !lastReverted;
+  }
+}

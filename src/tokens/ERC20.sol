@@ -87,6 +87,7 @@ abstract contract ERC20 {
         unchecked {
             balanceOf[to] += amount;
         }
+        // balanceOf[to] += amount;
 
         emit Transfer(msg.sender, to, amount);
 
@@ -110,6 +111,7 @@ abstract contract ERC20 {
         unchecked {
             balanceOf[to] += amount;
         }
+        // balanceOf[to] += amount;
 
         emit Transfer(from, to, amount);
 
