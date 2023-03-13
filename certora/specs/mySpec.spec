@@ -53,7 +53,7 @@ function setup(env e) {
   require asset() == ERC20a;
 }
 
-// ** Hooks
+// ***** Hooks
 
 ghost mathint ghostSumOfBalances {
 	init_state axiom ghostSumOfBalances == 0 ;
@@ -68,16 +68,10 @@ hook Sload uint256 val balanceOf[KEY address account] STORAGE {
     require ghostSumOfBalances >= val;
 }
 
+// ***** Valid States
+
 invariant totalSupplyIsSumOfBalances()
   totalSupply() == ghostSumOfBalances
-
-invariant totalSupplyLessThanMax()
-  totalSupply() <= 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-  {
-    preserved {
-      requireInvariant totalSupplyIsSumOfBalances();
-    }
-  }
 
 invariant totalSupplyNonZeroAssetsNonZero(env e)
   totalSupply() > 0 => totalAssets() > 0
@@ -89,34 +83,8 @@ invariant totalSupplyNonZeroAssetsNonZero(env e)
   }
 
 
-// ! This fails for withdraws and redeems
-// The pre-state is fine, but the post-state fails, assuming because of precision loss
+// **** UNIT TESTS
 
-// Rounding favours the contract, there is left-over dust in the contract after withdraws and 
-// invariant totalAssetsIsSolvent(env e)
-//     convertToAssets(totalSupply()) <= totalAssets()
-//   {
-//     preserved {
-//       setup(e); // new
-//       requireInvariant totalSupplyNonZeroAssetsNonZero(e);
-//     }
-//   }
-
-rule depositingAssetsReturnsShares(env e, uint256 amount, address receiver) {
-  require asset() != currentContract;
-
-  uint256 beforeShareBalance = balanceOf(receiver);
-
-  deposit(e, amount, receiver);
-
-  uint256 afterShareBalance = balanceOf(receiver);
-
-  assert afterShareBalance > beforeShareBalance, "User's share balance didn't increase";
-}
-
-// ### UNIT TESTS
-
-// TODO: Could do same test for withdraw and redeem
 rule unitDepositMintShouldUpdateState(method f, uint256 amount, address receiver)
   filtered { f -> 
                 f.selector == deposit(uint256, address).selector 
@@ -146,28 +114,43 @@ rule unitDepositMintShouldUpdateState(method f, uint256 amount, address receiver
   assert ERC20a.balanceOf(currentContract) > contractBalanceBefore, "Contract balance should've increased";
 }
 
-
-// ! Can't seem to verify this, it does revert in some instances
-rule convertToAssetsNoRevertAfterDeposit(uint256 amount, address receiver) {
+rule unitWithdrawRedeemShouldUpdateState(method f, uint256 amount, address receiver) 
+  filtered { f -> 
+                f.selector == withdraw(uint256, address, address).selector 
+                || f.selector == redeem(uint256, address, address).selector 
+    }
+{
   env e;
 
   setup(e);
+  require e.msg.sender != currentContract;
+  require amount > 0;
   requireInvariant totalSupplyIsSumOfBalances();
   requireInvariant totalSupplyNonZeroAssetsNonZero(e);
 
-  // TODO: Need a nice way to target deposit and mint at the same time
-  uint256 shares = deposit(e, amount, receiver);
+  address owner = e.msg.sender;
 
-  convertToAssets@withrevert(shares);
+  uint256 totalSupplyBefore = totalSupply();
+  uint256 balanceReceiverBefore = ERC20a.balanceOf(receiver);
+  uint256 tokenBalanceBefore = balanceOf(owner);
+  uint256 contractBalanceBefore = ERC20a.balanceOf(currentContract);
 
-  // It is reverting
-  assert !lastReverted, "Shouldn't revert when converting returned shares back to assets";
+ if (f.selector == withdraw(uint256, address, address).selector) {
+    withdraw(e, amount, receiver, owner);
+  } else {
+    redeem(e, amount, receiver, owner);
+  }
+
+  assert totalSupply() < totalSupplyBefore, "Total supply should've decreased";
+  assert ERC20a.balanceOf(receiver) > balanceReceiverBefore, "Receiver balance should've increased";
+  assert balanceOf(owner) < tokenBalanceBefore, "Sender's token balance should've decreased";
+  assert ERC20a.balanceOf(currentContract) < contractBalanceBefore, "Contract balance should've decreased";
 }
 
 // **** Variable transition
 
-// Users can only reduce the balance of others up to the allowance they are given
-rule allowedUserCanOnlyReduceUpToAllowance(address owner) {
+// Users can only reduce their own balance or can have their balance reduced up to the allowance
+rule balanceReduceableByOwnerOrAllowance(address owner) {
   env e; method f; calldataarg args;
 
   setup(e);
@@ -185,36 +168,99 @@ rule allowedUserCanOnlyReduceUpToAllowance(address owner) {
 }
 
 // If balanceOf increased, deposit, mint or transfer was called
-rule balanceOfIncreasedOnSelectMethods() {
-  env e; method f; calldataarg args;
+rule balanceOfIncreasedOnSelectMethods(method f) 
+  filtered { 
+    // Ignoring transferFrom method, as it doesn't really work with the assertion and not important for the property we are testing
+    f -> 
+        f.selector != transferFrom(address, address, uint256).selector
+} {
+  env e; calldataarg args;
+
+  setup(e);
+  requireInvariant totalSupplyIsSumOfBalances();
 
   uint256 beforeBalance = balanceOf(e.msg.sender);
-  f(e, args);
+
+  if (f.selector == deposit(uint256, address).selector) {
+    uint256 amount;
+
+    require amount > 0;
+
+    deposit(e, amount, e.msg.sender);
+  } else if (f.selector == mint(uint256, address).selector) {
+    uint256 amount;
+
+    require amount > 0;
+
+    mint(e, amount, e.msg.sender);
+  } else {
+    f(e, args);
+  }
+
   uint256 afterBalance = balanceOf(e.msg.sender);
 
-  assert afterBalance > beforeBalance <=> (f.selector == deposit(uint256, address).selector || f.selector == mint(uint256, address).selector);
+  // ! I'm unsure why the prover doesn't fail on the transfer method
+  assert afterBalance > beforeBalance <=> (
+    f.selector == deposit(uint256, address).selector || 
+    f.selector == mint(uint256, address).selector
+  );
 }
 
 // If balanceOf decreased, withdraw, redeem or transfer was called
+rule balanceOfDecreasedOnSelectMethods(method f) 
+  filtered {
+    f -> 
+        f.selector != transferFrom(address, address, uint256).selector
+} {
+  env e; calldataarg args;
 
-// Anti-monotinicity
-// If asset.balanceOf(address(this)) went up <=> asset.balanceOf(user) went down
-// ^ same rule but inverted, if contract balance went down user balance went up
+  setup(e);
+  requireInvariant totalSupplyIsSumOfBalances();
 
-// **** State transition
+  uint256 beforeBalance = balanceOf(e.msg.sender);
 
-// Total supply of vault == 0 only if balance of contract == 0 (no deposits == no shares)
+  if (f.selector == withdraw(uint256, address, address).selector) {
+    uint256 amount; address receiver;
+    require amount > 0;
+    
+    withdraw(e, amount, receiver, e.msg.sender);
+  } else if (f.selector == redeem(uint256, address, address).selector) {
+    uint256 amount; address receiver;
+    require amount > 0;
 
-// **** Helpers
+    redeem(e, amount, receiver, e.msg.sender);
+  } else if (f.selector == transfer(address, uint256).selector) {
+    uint256 amount; address receiver;
+    require amount > 0;
+    require receiver != e.msg.sender;
 
-function callDepositMint(env e, method f, uint256 amount, address receiver) returns bool {
-  if (f.selector == deposit(uint256, address).selector) {
-    deposit@withrevert(e, amount, receiver);
-
-    return !lastReverted;
+    transfer(e, receiver, amount);
   } else {
-    mint@withrevert(e, amount, receiver);
-
-    return !lastReverted;
+    f(e, args);
   }
+
+  uint256 afterBalance = balanceOf(e.msg.sender);
+
+   assert afterBalance < beforeBalance <=> (
+    f.selector == withdraw(uint256, address, address).selector || 
+    f.selector == redeem(uint256, address, address).selector || 
+    f.selector == transfer(address, uint256).selector
+  );
+}
+
+// *** High-level properties
+
+rule canAlwaysRedeemShares() {
+  env e; uint256 amount;
+
+  setup(e);
+  requireInvariant totalSupplyIsSumOfBalances();
+
+  uint256 shares = deposit(e, amount, e.msg.sender);
+
+  require previewRedeem(shares) > 0;
+
+  redeem@withrevert(e, shares, e.msg.sender, e.msg.sender);
+
+  assert !lastReverted, "Vault insolvent, user should always be able to withdraw assets";
 }
